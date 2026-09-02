@@ -4,22 +4,24 @@
 // registered tool against the real `codegraph` CLI on a real test project.
 import { spawn } from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+const isWin = process.platform === 'win32'
 
 // --- locate the installed plugin -----------------------------------------
 const profileNodeModules = process.env.CG_PROFILE_NM
 const pluginRoot = profileNodeModules
   ? join(profileNodeModules, 'dsh-codegraph')
   : join(__dirname, '..') // fall back to the working checkout
-const plugin = await import(join(pluginRoot, 'lib/index.js'))
+const plugin = await import(pathToFileURL(join(pluginRoot, 'lib/index.js')).href)
 
 // --- tiny real subprocess executor (minimal child_process wrapper) --------
 function runProc(argv, cwd) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
       cwd: cwd || '/',
       stdio: ['ignore', 'pipe', 'pipe']
@@ -29,17 +31,37 @@ function runProc(argv, cwd) {
     child.stdout.on('data', (d) => (out += d.toString()))
     child.stderr.on('data', (d) => (err += d.toString()))
     child.on('error', reject)
-    child.on('close', (code) => resolve({ exitCode: code, stdout: out, stderr: err }))
+    child.on('close', (code) => resolvePromise({ exitCode: code, stdout: out, stderr: err }))
   })
+}
+
+// Resolve a bare command the way dsh's subprocess service does on this
+// platform: PATHEXT scan on Windows (lands on .cmd/.exe shims), `which` on
+// POSIX.
+function resolveExecutable(name) {
+  if (isWin) {
+    const pathDirs = (process.env.PATH || '').split(';')
+    const extensions = name.includes('.') || name.includes('\\') || name.includes('/')
+      ? ['']
+      : (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
+    for (const dir of pathDirs) {
+      for (const ext of extensions) {
+        const candidate = resolve(process.cwd(), dir, name + ext)
+        if (existsSync(candidate)) return candidate
+      }
+    }
+    throw new Error(`not found: ${name}`)
+  }
+  try {
+    return execFileSync('which', [name]).toString().trim()
+  } catch {
+    throw new Error(`not found: ${name}`)
+  }
 }
 
 const subprocessService = {
   async resolveExecutable(name) {
-    try {
-      return execFileSync('which', [name]).toString().trim()
-    } catch {
-      throw new Error(`not found: ${name}`)
-    }
+    return resolveExecutable(name)
   },
   spawn({ argv, cwd, stdio }) {
     // stdio caps are ignored here; real service collects streams
@@ -65,7 +87,7 @@ const shellService = {
     return { command, workdir }
   },
   async run(spec) {
-    const r = await runProc(['/bin/bash', '-c', spec.command], spec.workdir)
+    const r = await runProc([isWin ? 'cmd.exe' : '/bin/bash', isWin ? '/d' : '-c', spec.command], spec.workdir)
     return { exitCode: r.exitCode, stdout: { text: r.stdout }, stderr: { text: r.stderr } }
   }
 }
@@ -99,7 +121,8 @@ const ctx = {
 }
 
 // --- apply the plugin ------------------------------------------------------
-const sessionCwd = '/tmp/cg-test-proj' // tools default to this via exec.agent
+const sessionCwd = isWin ? join(tmpdir(), 'cg-test-proj') : '/tmp/cg-test-proj' // tools default to this via exec.agent
+mkdirSync(sessionCwd, { recursive: true })
 
 function makeExec() {
   const aborted = { value: false }
@@ -303,7 +326,7 @@ try {
 
 console.log('\n=== 13) path arg override (point at test project explicitly) ===')
 try {
-  const s = String(await call('codegraph_status', { path: '/tmp/cg-test-proj' }))
+  const s = String(await call('codegraph_status', { path: sessionCwd }))
   console.log('   status(path):', s.slice(0, 200))
   ok('codegraph_status with explicit path')
 } catch (e) {

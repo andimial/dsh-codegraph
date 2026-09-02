@@ -20,12 +20,15 @@ jobs:
       - name: Install codegraph CLI
         run: npm install -g @colbymchenry/codegraph
 
-      # @deepseek-ai/dsh-tools and schemastery are peerDependencies of the
-      # plugin; install them into the repo's node_modules so the test harness
-      # can import the plugin's lib/index.js and resolve defineTool/Config.
-      # (In a real DSH profile these are already provided by the harness.)
-      - name: Install plugin peer dependencies
-        run: npm install --no-save @deepseek-ai/dsh-tools@0.1.0-rc.7 @deepseek-ai/schemastery@3.18.1
+      # @deepseek-ai/dsh-tools, dsh-llm, schemastery (+ runtime peers
+      # cordis/dsh-scope/dsh-invariants) are peerDependencies of the plugin,
+      # provided by the DSH harness in production. Source-direct loads (CI,
+      # dev includes) must install them locally: they are pinned as
+      # devDependencies in package.json (versions matching the current
+      # harness), so `npm ci` replays the lockfile instead of the old
+      # ad-hoc --no-save hack that missed dsh-llm.
+      - name: Install plugin dev/peer dependencies
+        run: npm ci --legacy-peer-deps
 
       - name: Run plugin test harness
         run: node test/run-plugin-test.mjs

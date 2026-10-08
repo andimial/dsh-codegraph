@@ -8,6 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both lines the plugin's peer ranges admit. 0.2.0 gates installation on
+        # peerDependencies, so it must be exercised for real, not assumed.
+        dsh:
+          - '0.1.5-rc.3'
+          - '0.2.0-rc.2'
+    name: dsh ${{ matrix.dsh }}
     steps:
       - uses: actions/checkout@v4
 
@@ -17,18 +26,65 @@ jobs:
 
       # The plugin wraps the real `codegraph` CLI; install it so the harness
       # exercises the actual binary on PATH.
+      #
+      # `@colbymchenry/codegraph` is only a thin launcher: the heavy artifact is
+      # a per-platform optionalDependency (e.g. codegraph-linux-x64). npm treats
+      # an unfetchable optional dep as SUCCESS and silently skips it, so a
+      # registry that fails to mirror the platform package leaves the shim
+      # installed but unable to exec anything — surfacing later as
+      # `spawn .../bin/codegraph ENOENT`. Install the matching platform package
+      # explicitly (so a silent skip cannot happen), then VERIFY the binary is
+      # genuinely runnable instead of trusting the install step's exit code.
       - name: Install codegraph CLI
-        run: npm install -g @colbymchenry/codegraph
+        run: |
+          set -euo pipefail
+          npm install -g @colbymchenry/codegraph
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)  platform='@colbymchenry/codegraph-linux-x64' ;;
+            Linux-aarch64) platform='@colbymchenry/codegraph-linux-arm64' ;;
+            Darwin-arm64)  platform='@colbymchenry/codegraph-darwin-arm64' ;;
+            Darwin-x86_64) platform='@colbymchenry/codegraph-darwin-x64' ;;
+            *)             platform='' ;;
+          esac
+          if [ -n "$platform" ]; then
+            echo "ensuring platform bundle $platform is present"
+            npm install -g "@colbymchenry/codegraph@latest" "$platform" || \
+              echo "::warning::$platform could not be installed; relying on the shim's download fallback"
+          fi
 
-      # @deepseek-ai/dsh-tools, dsh-llm, schemastery (+ runtime peers
-      # cordis/dsh-scope/dsh-invariants) are peerDependencies of the plugin,
-      # provided by the DSH harness in production. Source-direct loads (CI,
-      # dev includes) must install them locally: they are pinned as
-      # devDependencies in package.json (versions matching the current
-      # harness), so `npm ci` replays the lockfile instead of the old
-      # ad-hoc --no-save hack that missed dsh-llm.
+      - name: Verify the codegraph CLI actually runs
+        run: |
+          set -euo pipefail
+          command -v codegraph || { echo "::error::codegraph is not on PATH"; exit 1; }
+          # A broken shim (missing platform bundle) fails here rather than
+          # 14 tests deep into the harness.
+          codegraph --version
+
+      # Runtime peers (cordis/dsh-scope/dsh-invariants) and dev deps are
+      # pinned in package-lock.json, so `npm ci` replays the verified tree
+      # instead of the old ad-hoc --no-save hack that missed dsh-llm.
       - name: Install plugin dev/peer dependencies
         run: npm ci --legacy-peer-deps
+
+      # @deepseek-ai/dsh-tools and schemastery are peerDependencies of the
+      # plugin; install them into the repo's node_modules so the test harness
+      # can import the plugin's lib/index.js and resolve defineTool/Config.
+      # (In a real DSH profile these are already provided by the harness.)
+      # dsh-llm supplies the real createUserMessage used by the front-load
+      # path, so the harness runs against genuine peer implementations, not
+      # stubs. The matrix selects the dsh line under test; --no-save overlays
+      # it on the locked tree without drifting the lockfile.
+      - name: Install plugin peer dependencies (dsh ${{ matrix.dsh }})
+        run: |
+          npm install --no-save \
+            @deepseek-ai/dsh-tools@${{ matrix.dsh }} \
+            @deepseek-ai/dsh-llm@${{ matrix.dsh }} \
+            @deepseek-ai/schemastery@3.18.4
+
+      - name: Report the DSH version under test
+        run: |
+          node -e "console.log('dsh-tools', require('@deepseek-ai/dsh-tools/package.json').version)"
+          node -e "console.log('dsh-llm', require('@deepseek-ai/dsh-llm/package.json').version)"
 
       - name: Run plugin test harness
         run: node test/run-plugin-test.mjs

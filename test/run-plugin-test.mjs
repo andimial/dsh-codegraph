@@ -2,11 +2,18 @@
 // Loads the installed plugin's actual lib/index.js, mounts stub cordis
 // services (tools/subprocess/shell), calls apply(), and exercises every
 // registered tool against the real `codegraph` CLI on a real test project.
-import { spawn } from 'node:child_process'
-import { execFileSync } from 'node:child_process'
+//
+// The plugin imports `defineTool` from @deepseek-ai/dsh-tools and
+// `createUserMessage` from @deepseek-ai/dsh-llm. Those are REAL peer
+// dependencies, not stubs: resolution goes through node_modules, so whichever
+// DSH version the harness installs is the version whose argument validation,
+// Config schema, and message factory the plugin is exercised against. That is
+// what makes this suite a cross-version gate — see section 0 below.
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -35,9 +42,15 @@ function runProc(argv, cwd) {
   })
 }
 
+// Scripts resolveExecutable had to fall back to running under the current
+// Node (a `#!/usr/bin/env node` launcher that Node cannot exec directly).
+// Keyed by resolved script path -> the original command name.
+const shimScripts = new Map()
+
 // Resolve a bare command the way dsh's subprocess service does on this
-// platform: PATHEXT scan on Windows (lands on .cmd/.exe shims), `which` on
-// POSIX.
+// platform: a PATHEXT scan on Windows (lands on .cmd/.exe shims); on POSIX,
+// `which` plus spawnable probes, falling back to the shim's JS entry run by
+// the current Node.
 function resolveExecutable(name) {
   if (isWin) {
     const pathDirs = (process.env.PATH || '').split(';')
@@ -52,11 +65,48 @@ function resolveExecutable(name) {
     }
     throw new Error(`not found: ${name}`)
   }
+
+  // Resolve the way the REAL subprocess service does: hand back something
+  // Node can actually spawn.
+  //
+  // `which` alone is not enough. npm global bins are symlinks into the
+  // package (or, for shim packages, a `#!/usr/bin/env node` launcher), and a
+  // shell happily runs those while `spawn()` needs a real executable file at
+  // the resolved path. On CI `which codegraph` returned a path that
+  // `codegraph --version` ran fine from bash yet `spawn()` rejected with
+  // ENOENT — 14 tests failed on an environment quirk that had nothing to do
+  // with the plugin. So: locate it, then prove Node can spawn it, and fall
+  // back to running the JS entry through the current Node when it cannot.
+  const candidates = []
   try {
-    return execFileSync('which', [name]).toString().trim()
-  } catch {
-    throw new Error(`not found: ${name}`)
+    candidates.push(execFileSync('which', [name]).toString().trim())
+  } catch { /* not on PATH; try the fallbacks below */ }
+
+  // Fallback: a global bin directory that is not the running Node's.
+  const nodeDir = dirname(process.execPath)
+  candidates.push(join(nodeDir, name))
+
+  for (const candidate of candidates) {
+    if (!candidate || !existsSync(candidate)) continue
+    try {
+      // Proven spawnable only if a bare spawn of it does not error.
+      const probe = spawnSync(candidate, ['--version'], { stdio: 'ignore', timeout: 30000 })
+      if (!probe.error && probe.status === 0) return candidate
+    } catch { /* try the next candidate */ }
   }
+
+  // Last resort: resolve the shim's JS file and run it with the current Node.
+  // The returned value is a path the plugin execs directly, so recover the
+  // script path here and let spawn() prepend the interpreter.
+  try {
+    const which = execFileSync('which', [name]).toString().trim()
+    const real = realpathSync(which)
+    if (existsSync(real)) {
+      shimScripts.set(real, name)
+      return real
+    }
+  } catch { /* fall through to the error */ }
+  throw new Error(`not found: ${name}`)
 }
 
 const subprocessService = {
@@ -69,8 +119,13 @@ const subprocessService = {
       stdout: { readFrom: () => undefined },
       stderr: { readFrom: () => undefined }
     }
+    // If resolveExecutable fell back to a `#!/usr/bin/env node` script that
+    // Node cannot exec directly, run it under the current Node instead.
+    let spawnArgv = argv
+    const script = argv[0] && shimScripts.get(argv[0])
+    if (script !== undefined) spawnArgv = [process.execPath, argv[0], ...argv.slice(1)]
     // We bypass the stream-collection abstraction and run directly for the test.
-    const p = runProc(argv, cwd)
+    const p = runProc(spawnArgv, cwd)
     return {
       collected,
       done: p.then((r) => {
@@ -124,6 +179,51 @@ const ctx = {
 const sessionCwd = isWin ? join(tmpdir(), 'cg-test-proj') : '/tmp/cg-test-proj' // tools default to this via exec.agent
 mkdirSync(sessionCwd, { recursive: true })
 
+// The fixture project MUST exist on disk before any tool runs.
+//
+// The plugin spawns the CLI with `cwd: <project root>`, defaulting to the
+// session cwd. `spawn` with a directory that does not exist fails with
+// ENOENT — and Node reports that error against the COMMAND path
+// ("spawn /path/to/codegraph ENOENT"), not the cwd, so it reads exactly like a
+// missing binary. That misdirection cost real debugging time on CI, where the
+// runner starts with a clean /tmp and tests 5-13 all ran before `init` had
+// created the directory. A real session cwd always exists, so this is purely a
+// fixture-setup concern: create the project up front.
+function ensureFixtureProject() {
+  const files = {
+    'src/math.ts': [
+      'export function multiply(a: number, b: number): number {',
+      '  return a * b',
+      '}',
+      '',
+      'export function double(x: number): number {',
+      '  return multiply(x, 2)',
+      '}',
+      '',
+      'export function add(a: number, b: number): number {',
+      '  return a + b',
+      '}',
+      ''
+    ].join('\n'),
+    'src/index.ts': [
+      "import { double, add } from './math'",
+      '',
+      'export function main(): number {',
+      '  return double(21) + add(1, 2)',
+      '}',
+      ''
+    ].join('\n')
+  }
+  mkdirSync(join(sessionCwd, 'src'), { recursive: true })
+  for (const [rel, body] of Object.entries(files)) {
+    const target = join(sessionCwd, rel)
+    // Leave an existing index/source alone on a re-run, but make sure the
+    // tree is present either way.
+    if (!existsSync(target)) writeFileSync(target, body)
+  }
+}
+ensureFixtureProject()
+
 function makeExec() {
   const aborted = { value: false }
   let signal
@@ -167,6 +267,86 @@ const call = async (name, args) => {
   const raw = await tool.execute(args, exec)
   exec.abort()
   return raw
+}
+
+console.log('\n=== 0) installed DSH version + peer-range install gate ===')
+{
+  // The harness resolves the plugin's real peers from node_modules. Report the
+  // versions actually under test so a cross-version run is self-describing.
+  // Resolution order mirrors Node's own: the plugin's sibling node_modules
+  // first (a profile install / CG_PROFILE_NM staging dir), then the plugin
+  // root itself. Do NOT fall back to the repo's own node_modules after that —
+  // a stale local link would report a version the plugin never sees.
+  const readVersion = (pkg) => {
+    const candidates = [
+      join(pluginRoot, '..', pkg, 'package.json'), // sibling of the plugin dir
+      join(pluginRoot, 'node_modules', pkg, 'package.json'), // plugin-local
+      join(__dirname, '..', 'node_modules', pkg, 'package.json') // bare checkout
+    ]
+    for (const candidate of candidates) {
+      try {
+        if (existsSync(candidate)) return JSON.parse(readFileSync(candidate, 'utf8')).version
+      } catch { /* try the next candidate */ }
+    }
+    return undefined
+  }
+  const toolsVersion = readVersion('@deepseek-ai/dsh-tools')
+  const llmVersion = readVersion('@deepseek-ai/dsh-llm')
+  console.log(`   @deepseek-ai/dsh-tools: ${toolsVersion ?? '(unresolved)'}`)
+  console.log(`   @deepseek-ai/dsh-llm:   ${llmVersion ?? '(unresolved)'}`)
+  // Independently confirm what the PLUGIN itself resolves, so the printed
+  // version cannot drift from the runtime the assertions below exercise.
+  // createRequire seeded with the plugin's own entry file reproduces Node's
+  // real resolution for that module (sibling node_modules, then upward).
+  try {
+    const pluginRequire = createRequire(join(pluginRoot, 'lib/index.js'))
+    const resolvedManifest = pluginRequire.resolve('@deepseek-ai/dsh-tools/package.json')
+    const resolvedVersion = JSON.parse(readFileSync(resolvedManifest, 'utf8')).version
+    if (resolvedVersion === toolsVersion) ok(`plugin resolves dsh-tools ${resolvedVersion} (real peer, not a stub)`)
+    else bad('version probe disagrees with the plugin\'s own resolution', `probe=${toolsVersion} resolved=${resolvedVersion}`)
+  } catch (e) {
+    bad('cannot resolve @deepseek-ai/dsh-tools from the plugin — peers are not installed', null, e.message)
+  }
+
+  // DSH 0.2.0 gates installation on peerDependencies: it rejects when the
+  // running dsh version fails semver.satisfies(v, range, {includePrerelease:true}).
+  // A `<0.2.0-0` ceiling therefore hard-fails `dsh plugin add`, which is the
+  // exact regression this suite exists to prevent.
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(join(pluginRoot, 'package.json'), 'utf8'))
+  } catch {
+    manifest = undefined
+  }
+  const peers = manifest?.peerDependencies ?? {}
+  const dshPeers = Object.entries(peers).filter(([n]) => n === '@deepseek-ai/dsh' || n.startsWith('@deepseek-ai/dsh-'))
+  if (dshPeers.length > 0) ok(`manifest declares ${dshPeers.length} @deepseek-ai/dsh* peer range(s)`)
+  else bad('manifest declares no @deepseek-ai/dsh* peerDependencies')
+
+  // Any 0.2.x runtime must survive every declared range. Evaluate the ranges
+  // as plain SemVer comparisons so this check needs no semver dependency.
+  const parse = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v))
+    return m ? { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] } : undefined
+  }
+  // Compare only the numeric bound that each range clause carries; that is
+  // enough to catch a ceiling that excludes a whole minor line.
+  const upperBoundExcludes = (range, target) => {
+    const t = parse(target)
+    return range.split('||').every((clause) => {
+      const upper = /<\s*(\d+)\.(\d+)\.(\d+)/.exec(clause)
+      if (!upper) return false // unbounded clause: cannot exclude
+      const u = { major: +upper[1], minor: +upper[2], patch: +upper[3] }
+      if (t.major !== u.major) return t.major >= u.major
+      if (t.minor !== u.minor) return t.minor >= u.minor
+      return t.patch >= u.patch
+    })
+  }
+  for (const version of ['0.2.0', '0.2.0-rc.2', '0.2.5']) {
+    const blocked = dshPeers.filter(([, range]) => upperBoundExcludes(range, version)).map(([n]) => n)
+    if (blocked.length === 0) ok(`peer ranges admit DSH ${version} (install gate passes)`)
+    else bad(`peer ranges REJECT DSH ${version} — \`dsh plugin add\` would hard-fail the install`, blocked.join(', '))
+  }
 }
 
 console.log('\n=== 1) plugin.apply mounts (surface: full — exercises every tool) ===')
@@ -244,6 +424,62 @@ const codeTools = names.filter((n) => n.startsWith('codegraph_'))
 console.log('   registered:', names.join(', '))
 if (codeTools.length === 13) ok(`13 codegraph_* tools registered`, codeTools.join(', '))
 else bad(`expected 13 codegraph_* tools, got ${codeTools.length}`, null)
+
+console.log('\n=== 4b) ToolDefinition shape matches DSH 0.2.0 contract ===')
+{
+  // defineTool is the REAL one from the installed dsh-tools, so a definition
+  // that survives this block is a definition the registry accepts.
+  const probe = registeredTools.find((t) => t.name === 'codegraph_status')
+  for (const field of ['name', 'description', 'parameters', 'output', 'execute']) {
+    if (probe[field] !== undefined) ok(`definition exposes "${field}"`)
+    else bad(`definition missing required DSH field "${field}"`)
+  }
+  if (typeof probe.execute === 'function') ok('execute is a function')
+  else bad('execute must be a function')
+
+  // output.render is the Native projection; in 0.2.0 it receives the RAW call
+  // args, which may be malformed. It must not throw and must return blocks.
+  try {
+    const blocks = probe.output.render({}, 'status-text')
+    if (Array.isArray(blocks) && blocks[0]?.type === 'text' && blocks[0].text === 'status-text') {
+      ok('output.render returns ContentBlock[] for a plain string value')
+    } else {
+      bad('output.render should return [{type:"text", text}]', JSON.stringify(blocks))
+    }
+  } catch (e) {
+    bad('output.render threw', null, e.message)
+  }
+  try {
+    const blocks = probe.output.render({}, undefined)
+    if (Array.isArray(blocks)) ok('output.render tolerates a non-string value (no throw)')
+    else bad('output.render should always return an array')
+  } catch (e) {
+    bad('output.render must not throw on malformed input', null, e.message)
+  }
+
+  // presentCall must return a ToolCallView discriminated by `card`. 0.2.0
+  // turned this into a union ('generic' | 'terminal' | 'diff'), so an
+  // untagged object would no longer be a valid view.
+  try {
+    const view = probe.presentCall({})
+    if (view && view.card === 'terminal') ok('presentCall returns a tagged terminal ToolCallView (card: "terminal")')
+    else bad('presentCall must return a card-tagged view', JSON.stringify(view))
+    if (view && typeof view.title === 'string' && view.title.length > 0) ok('terminal view carries a non-empty title (the command line)')
+    else bad('terminal view needs a non-empty title')
+  } catch (e) {
+    bad('presentCall threw', null, e.message)
+  }
+
+  // timeoutMs is optional metadata; when declared it must be a positive number.
+  const withTimeout = registeredTools.filter((t) => t.timeoutMs !== undefined)
+  if (withTimeout.length > 0 && withTimeout.every((t) => typeof t.timeoutMs === 'number' && t.timeoutMs > 0)) {
+    ok(`${withTimeout.length} tools declare a positive timeoutMs budget`)
+  } else if (withTimeout.length === 0) {
+    ok('no tool declares timeoutMs (optional in 0.2.0)')
+  } else {
+    bad('timeoutMs must be a positive number when declared')
+  }
+}
 
 console.log('\n=== 5) codegraph_status (not yet indexed) ===')
 try {
@@ -426,6 +662,15 @@ console.log('\n=== 19) frontload: structural zh prompt on indexed project → st
     }
     if (steered[0].role === 'user' && steered[0].id) ok('steered message is a valid user message (id + role)')
     else bad('steered message malformed')
+    // 0.2.0 shape: UserMessage is frozen and carries a merge-extensible source
+    // tag. The front-load listener gates on `source.kind`, so a message that
+    // lost its source would silently stop front-loading.
+    if (steered[0].source && steered[0].source.kind === 'user') ok('steered message carries source.kind === "user" (0.2.0 MessageSourceMap shape)')
+    else bad('steered message must carry a user source tag', JSON.stringify(steered[0].source))
+    if (Object.isFrozen(steered[0])) ok('steered message is frozen (0.2.0 createUserMessage freezes before publication)')
+    else bad('steered message should be frozen by createUserMessage')
+    if (Array.isArray(steered[0].content) && steered[0].content.length > 0) ok('steered message content is a ContentBlock[] array')
+    else bad('steered message content must be a non-empty ContentBlock array')
   }
 }
 

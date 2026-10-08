@@ -12,3 +12,6 @@
 - insert:
     - id: dsh-codegraph
       name: dsh-codegraph
+      require: dsh-codegraph
+      config:
+        surface: full

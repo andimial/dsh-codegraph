@@ -37,6 +37,19 @@
 
 1. 已安装 [DSH](https://github.com/deepseek-ai/deepseek-harness)（本插件为 DSH bundle，随
    DSH web 应用装载）。
+
+   **支持的 DSH 版本：`0.1.x` 与 `0.2.x`（含 `0.2.0`）**，两条线共用同一份代码。
+   插件使用的接口在本插件所覆盖的范围内跨版本稳定：`defineTool`（`name`/`description`/
+   `parameters`/`output`/`execute`/`presentCall`/`timeoutMs`）、`tools.register()`、
+   `systemPrompt.section()`、`createUserMessage`、`ctx.get('subprocess' | 'shell')`，
+   以及 `agent/inbox/inserted` 事件 + `agent.steer()`。
+
+   > ⚠️ **安装门槛在 `peerDependencies` 上，不在代码里。** DSH 0.2.0 起会在安装前校验本包
+   > `peerDependencies` 中每个 `@deepseek-ai/dsh*` 范围：若当前 DSH 版本不满足
+   > `semver.satisfies(v, range, { includePrerelease: true })`，`dsh plugin add` 会**直接拒绝安装**
+   > （报 `incompatible-version`）。因此本插件的上限是 `<0.3.0-0` 而非 `<0.2.0-0`——
+   > 后者会把所有 `0.2.x` 预发布版一并排除。若从 `1.1.0` 及更早版本升级，请一并更新插件。
+
 2. 已安装 `codegraph` CLI 且其可执行文件在 `PATH` 上（插件在运行时按名字 `codegraph`
    解析可执行文件）：
 
@@ -166,6 +179,37 @@ CG_PROFILE_NM=<profile>/node_modules node test/run-plugin-test.mjs
 同文重发去重、非结构性/未索引/自循环/rpc 来源静默跳过、`frontload:false` 不注册监听器）、
 **无执行器服务时 apply 不抛错**（惰性解析，启动顺序安全）、
 显式 `path` 覆盖、以及「无 cwd 且无 path 时报错」的错误路径。
+
+### 跨 DSH 版本验证
+
+harness 走 node_modules 解析**真实的** `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm`
+（不是桩），因此「装上哪个 DSH 版本，就用哪个版本的参数校验、Config schema 与消息工厂
+来跑插件」。这让测试套件本身成为跨版本闸门：
+
+- **第 0 节 · 版本与安装门槛**：打印实际解析到的 `dsh-tools` / `dsh-llm` 版本，
+  并用 `createRequire` 按插件自己的路径复核（保证打印版本 == 插件真正加载的版本）；
+  随后逐一断言 manifest 里每个 `@deepseek-ai/dsh*` peer 范围都放行 `0.2.0` /
+  `0.2.0-rc.2` / `0.2.5`——即 **0.2.0 安装门槛不会误杀本插件**。
+  这一节专门用来锁死「peer 上限写成 `<0.2.0-0`」这类回归。
+- **第 4b 节 · ToolDefinition 契约**：断言 `name`/`description`/`parameters`/`output`/`execute`
+  齐备；`output.render` 返回 `ContentBlock[]` 且对非法输入不抛错；`presentCall` 返回
+  **带 `card: 'terminal'` 标签**的 view（0.2.0 起 `ToolCallView` 是
+  `'generic' | 'terminal' | 'diff'` 的可辨识联合，无标签对象不再合法）；
+  `timeoutMs` 声明时为正数。
+- **第 19 节 · 消息形状**：断言 frontload 注入的消息带 `source.kind === 'user'`
+  （0.2.0 的 `MessageSourceMap` 形状，监听器正是据此放行）、且被 `createUserMessage` 冻结。
+
+CI（`.github/workflows/test.yml`）以 `dsh 0.1.5-rc.3` 与 `dsh 0.2.0-rc.2` 双版本矩阵运行同一套用例。
+
+本地对指定版本跑：
+
+```bash
+# 直接跑（用仓库 node_modules 里的 peer）
+node test/run-plugin-test.mjs
+
+# 或指向某个 profile / 已安装 dsh 0.2.0 的 node_modules
+CG_PROFILE_NM=<profile>/node_modules node test/run-plugin-test.mjs
+```
 
 > 说明：`callers`/`callees` 在本机 `codegraph@1.0.1` 上返回空数组是 **CLI 侧数据/索引特性**
 > （该版本的调用图边未解析到），与插件无关——插件忠实返回 CLI 的真实输出；`impact` 已能

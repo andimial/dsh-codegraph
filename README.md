@@ -76,13 +76,22 @@ dsh plugin --profile web add github:jiangzhenguo/dsh-codegraph
 
 > 其他 profile：把 `--profile web` 换成 `--profile tui` 等即可。
 
-### 从 npm 安装（备选）
+### 从 npm 安装
 
-本包同样可按常规 npm 包发布/安装；若已发布到 npm，用包名替换上面开头的 `github:` 即可。
+本包已发布到 npm（[`@jiangzhenguo/dsh-codegraph`](https://www.npmjs.com/package/@jiangzhenguo/dsh-codegraph)，
+无 scope 的 `dsh-codegraph` 名字已被他人占用），用包名替换 `github:` 源即可：
+
+```bash
+dsh plugin --profile web add @jiangzhenguo/dsh-codegraph
+```
 
 ### 卸载
 
 ```bash
+# 从 npm 安装的
+dsh plugin --profile web remove @jiangzhenguo/dsh-codegraph
+
+# 从 GitHub 安装的
 dsh plugin --profile web remove dsh-codegraph
 ```
 

@@ -128,6 +128,11 @@ grep / glob / read**：
 - **去重**：同文 prompt 在 10 分钟内重复进入收件箱（GUI 重发排队消息、step 被拒后重新
   入队——每次消息 id 都是新的）只会注入一次，避免重复上下文。
 - 可用配置 `frontload: false` 整体关闭。
+- **注入的是一条 user 消息，会在聊天列表里多显示一条**——内容以 `<codegraph_context
+  note="Structural context from CodeGraph for this prompt — treat the returned source as
+  already read; call codegraph_explore for more.">` 开头。这是 DSH 的机制决定的：
+  `agent.steer()` 只能投递消息，没有「不可见的上下文通道」，所以 frontload 的代价就是
+  聊天里多一条 steer 消息（本机 profile 已因此把它关掉，只保留工具与系统提示指引）。
 
 ## 配置
 

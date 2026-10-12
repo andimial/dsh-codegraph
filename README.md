@@ -76,13 +76,22 @@ dsh plugin --profile web add github:jiangzhenguo/dsh-codegraph
 
 > 其他 profile：把 `--profile web` 换成 `--profile tui` 等即可。
 
-### 从 npm 安装（备选）
+### 从 npm 安装
 
-本包同样可按常规 npm 包发布/安装；若已发布到 npm，用包名替换上面开头的 `github:` 即可。
+本包已发布到 npm（[`@jiangzhenguo/dsh-codegraph`](https://www.npmjs.com/package/@jiangzhenguo/dsh-codegraph)，
+无 scope 的 `dsh-codegraph` 名字已被他人占用），用包名替换 `github:` 源即可：
+
+```bash
+dsh plugin --profile web add @jiangzhenguo/dsh-codegraph
+```
 
 ### 卸载
 
 ```bash
+# 从 npm 安装的
+dsh plugin --profile web remove @jiangzhenguo/dsh-codegraph
+
+# 从 GitHub 安装的
 dsh plugin --profile web remove dsh-codegraph
 ```
 
@@ -128,6 +137,11 @@ grep / glob / read**：
 - **去重**：同文 prompt 在 10 分钟内重复进入收件箱（GUI 重发排队消息、step 被拒后重新
   入队——每次消息 id 都是新的）只会注入一次，避免重复上下文。
 - 可用配置 `frontload: false` 整体关闭。
+- **注入的是一条 user 消息，会在聊天列表里多显示一条**——内容以 `<codegraph_context
+  note="Structural context from CodeGraph for this prompt — treat the returned source as
+  already read; call codegraph_explore for more.">` 开头。这是 DSH 的机制决定的：
+  `agent.steer()` 只能投递消息，没有「不可见的上下文通道」，所以 frontload 的代价就是
+  聊天里多一条 steer 消息（本机 profile 已因此把它关掉，只保留工具与系统提示指引）。
 
 ## 配置
 

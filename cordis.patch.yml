@@ -11,7 +11,7 @@
 # no browser/client half.
 - insert:
     - id: dsh-codegraph
-      name: dsh-codegraph
-      require: dsh-codegraph
+      name: '@jiangzhenguo/dsh-codegraph'
+      require: '@jiangzhenguo/dsh-codegraph'
       config:
         surface: full

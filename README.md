@@ -129,10 +129,12 @@ grep / glob / read**：
     → 先用 `codegraph query` 对照索引验证 token 是**同名符号**（模糊命中不算：散文里的
     `Edge` / `Desktop` 不再冒充代码 token）才触发；
   - 其余 prompt（如「fix this typo」）零开销静默跳过。
-- 触发前先**净化查询**：剥掉 `@文件引用`、盘符 / UNC / 系统根路径（`/tmp`、`/usr` …）
-  这类**真实路径形态**。它们只会匹配到某个恰好叫 `path` 的符号，日志路径更是不在索引里；
-  净化后没有代码残留就 no-op。裸 `/` 不算路径——`登录/注册流程` 与 `src/math.ts` 里的
-  关键词和文件名必须留下，否则本来必中的 prompt 会被静默吃掉。
+- 触发前先**净化查询**：剥掉 `@` 符号、盘符 / UNC / 系统根路径（`/tmp`、`/usr` …）的
+  **目录前缀**，只留能索引的**文件名**（`@src/math.ts` → `math.ts`）——explore 靠 query
+  里的文件名 pin 文件，中置信门靠它验 token，整段删掉等于把精确查询换成泛化检索。
+  边界是 `[^\w/\\]` 而不是 ASCII 空白，`日志在C:\proj\src\math.ts` 这种中文紧邻也照剥。
+  裸 `/` 不算路径——`登录/注册流程` 里的关键词、`src/lib/utils.ts` 里的文件名必须留下。
+  非代码扩展名（`itx_helper.log`）整段丢弃，不留在 query 里。
 - 触发后在会话 cwd 向上找最近的 `.codegraph/` 索引根（找不到 = 未索引 = 静默跳过，
   **是否索引是用户的决定，插件不擅自 init**），预跑 `codegraph_explore`，把结果以
   `<codegraph_context>` 包裹 steer 进当前 turn（上限 12000 字符）。
@@ -140,6 +142,8 @@ grep / glob / read**：
   `vendor/`、`node_modules/` 等依赖树里时**不注入**。这种 dump 不是上下文而是负样本——
   模型读一次就认定「这工具给的是噪声」，之后整场不再调用（真实案例：一次日志排查注入
   40 个 asio/rest_rpc 符号，随后 0 次 codegraph 调用）。
+- **没命中也不注入**：explore 无结果时 exit 0，stdout 是 `No relevant code found for "…"`
+  那段劝退文案——同属负样本，直接丢。
 - 于是「模型反射性 grep/read 要找的东西已经在上下文里了」——context 先于工具调用到达。
 - **绝不弄坏用户 prompt**：所有失败路径（无索引、门控未命中、CLI 报错）都是静默 no-op；
   注入内容带标记，不会触发自身循环（steer 落在 next-step 边界，监听器只看 next-turn）。

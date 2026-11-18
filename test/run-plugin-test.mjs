@@ -979,15 +979,61 @@ console.log('\n=== 22g) frontload: `/lib/` mid-token is not a system root ===')
   }
 }
 
-console.log('\n=== 22h) frontload: an @-ref plus a short question still fires ===')
+console.log('\n=== 22h) frontload: an @-ref keeps its file NAME (explore pins it) ===')
 {
-  // DSH's most common shape. Sanitizing `@lib/index.js 调用流程` leaves
-  // `调用流程` (4 chars) — a length gate there would silently drop it.
-  const { agent, message, steered } = makeAgent(sessionCwd, '@lib/index.js 调用流程', 'fl-12')
+  // DSH's most common shape. The basename must survive: explore pins a file
+  // from the query (`1 file pinned from the query`) and hands back real source.
+  // Stripping the whole ref leaves `调用流程`, which explores to nothing.
+  const { agent, message, steered } = makeAgent(sessionCwd, '@src/math.ts 调用流程', 'fl-12')
   for (const h of frontloadHandlers) h.handler({ agent, message })
   const fired = await waitForSteer(steered, 45000)
-  if (fired) ok('@-ref + short question still front-loads')
-  else bad('an @-ref plus a short question must not be silently dropped')
+  if (!fired) {
+    bad('an @-ref path must not be stripped down to nothing')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('math.ts')) ok('@-ref keeps its file name and the pin lands')
+    else bad('@-ref lost the file name', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22i) frontload: a no-hit explore is dropped, not injected ===')
+{
+  // explore exits 0 with a `No relevant code found …` explainer. Steering that
+  // into the turn is the same negative sample as a vendored dump.
+  const { agent, message, steered } = makeAgent(sessionCwd, 'zzzqqq 的调用流程', 'fl-13')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) ok('no-hit explore result is dropped')
+  else bad('a `No relevant code found` body must not be injected', steered[0].content[0].text.slice(0, 140))
+}
+
+console.log('\n=== 22j) frontload: a path flush against Chinese text is still a path ===')
+{
+  // `日志在C:\proj\src\math.ts` has no space before the drive letter. An
+  // ASCII-only word boundary leaves the whole path in the query.
+  const { agent, message, steered } = makeAgent(sessionCwd, '日志在C:\\proj\\src\\math.ts 里 multiply 为什么错', 'fl-14')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a path flush against Chinese text must still be sanitized')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (!/C:\\\\?proj/.test(text)) ok('the directory prefix is gone')
+    else bad('a CJK-adjacent path leaked into the query', text.slice(0, 160))
+    if (text.includes('math.ts')) ok('its file name survives')
+    else bad('the CJK-adjacent path lost its file name', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22k) frontload: an @-ref file still verifies in the medium tier ===')
+{
+  // No structural keyword here: the gate has to verify `math.ts` against the
+  // index. The file token is what makes that possible.
+  const { agent, message, steered } = makeAgent(sessionCwd, '@src/math.ts 这里有问题', 'fl-15')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (fired) ok('file token from an @-ref verifies and fires')
+  else bad('an @-ref file token must still verify in the medium tier')
 }
 
 console.log('\n=== 23) config: frontload:false registers no listener ===')

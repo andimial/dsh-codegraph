@@ -1036,6 +1036,41 @@ console.log('\n=== 22k) frontload: an @-ref file still verifies in the medium ti
   else bad('an @-ref file token must still verify in the medium tier')
 }
 
+console.log('\n=== 22l) frontload: trailing punctuation does not swallow the basename ===')
+{
+  // `、` after the path used to be eaten as path text, so the basename failed
+  // CODE_EXT_RE and `math.ts` — plus the `multiply` after it — vanished.
+  const { agent, message, steered } = makeAgent(sessionCwd, '日志在C:\\proj\\src\\math.ts、multiply 为什么错', 'fl-16')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a path followed by `、` must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('math.ts')) ok('basename survives trailing punctuation')
+    else bad('trailing punctuation swallowed the basename', text.slice(0, 140))
+    if (text.includes('multiply')) ok('the word after the punctuation survives')
+    else bad('the word after the punctuation was swallowed', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22m) frontload: a bare @-ref to a non-code file is dropped ===')
+{
+  // `@itx_helper.log` has no drive letter, so only the ref branch sees it. The
+  // prompt still names a real symbol so this fires either way — what must NOT
+  // reach the turn is the `**Not in the index:** itx_helper.log` opening.
+  const { agent, message, steered } = makeAgent(sessionCwd, '@itx_helper.log multiply 的调用流程', 'fl-17')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('the real symbol in the prompt must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (!text.includes('itx_helper.log')) ok('non-code @-ref is dropped')
+    else bad('a non-code @-ref leaked into the query', text.slice(0, 160))
+  }
+}
+
 console.log('\n=== 23) config: frontload:false registers no listener ===')
 {
   const listeners3 = []

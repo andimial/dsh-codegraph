@@ -126,11 +126,20 @@ grep / glob / read**：
   - **高置信**：prompt 含结构性关键词（中/英：「调用 / 流程 / 原理 / 重构 / 影响 /
     依赖 / how does / who calls / refactor / trace …」）→ 直接触发；
   - **中置信**：prompt 含代码形态 token（文件名 / camelCase / PascalCase / snake_case）
-    → 先用 `codegraph query` 对照索引验证 token 是真实符号才触发；
+    → 先用 `codegraph query` 对照索引验证 token 是**同名符号**（模糊命中不算：散文里的
+    `Edge` / `Desktop` 不再冒充代码 token）才触发；
   - 其余 prompt（如「fix this typo」）零开销静默跳过。
+- 触发前先**净化查询**：剥掉 `@文件引用`、盘符 / UNC / 系统根路径（`/tmp`、`/usr` …）
+  这类**真实路径形态**。它们只会匹配到某个恰好叫 `path` 的符号，日志路径更是不在索引里；
+  净化后没有代码残留就 no-op。裸 `/` 不算路径——`登录/注册流程` 与 `src/math.ts` 里的
+  关键词和文件名必须留下，否则本来必中的 prompt 会被静默吃掉。
 - 触发后在会话 cwd 向上找最近的 `.codegraph/` 索引根（找不到 = 未索引 = 静默跳过，
   **是否索引是用户的决定，插件不擅自 init**），预跑 `codegraph_explore`，把结果以
   `<codegraph_context>` 包裹 steer 进当前 turn（上限 12000 字符）。
+- **vendor 结果丢弃**：explore 命中的文件有 ≥70%（且至少 4 个）落在 `3rdparty/`、
+  `vendor/`、`node_modules/` 等依赖树里时**不注入**。这种 dump 不是上下文而是负样本——
+  模型读一次就认定「这工具给的是噪声」，之后整场不再调用（真实案例：一次日志排查注入
+  40 个 asio/rest_rpc 符号，随后 0 次 codegraph 调用）。
 - 于是「模型反射性 grep/read 要找的东西已经在上下文里了」——context 先于工具调用到达。
 - **绝不弄坏用户 prompt**：所有失败路径（无索引、门控未命中、CLI 报错）都是静默 no-op；
   注入内容带标记，不会触发自身循环（steer 落在 next-step 边界，监听器只看 next-turn）。

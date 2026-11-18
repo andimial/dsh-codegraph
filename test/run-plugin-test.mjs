@@ -165,7 +165,11 @@ const shellService = {
     return { command, workdir }
   },
   async run(spec) {
-    const r = await runProc([isWin ? 'cmd.exe' : '/bin/bash', isWin ? '/d' : '-c', spec.command], spec.workdir)
+    // `/d /c` — without `/c` cmd.exe opens an interactive session, reads EOF
+    // from the ignored stdin and exits 0 having run NOTHING. That silently
+    // turned every shell-service call into a no-op.
+    const base = isWin ? ['cmd.exe', '/d', '/c'] : ['/bin/bash', '-c']
+    const r = await runProc([...base, spec.command], spec.workdir)
     return { exitCode: r.exitCode, stdout: { text: r.stdout }, stderr: { text: r.stderr } }
   }
 }
@@ -235,17 +239,59 @@ function ensureFixtureProject() {
       '  return double(21) + add(1, 2)',
       '}',
       ''
+    ].join('\n'),
+    // Names chosen for the medium-tier gate: `edgeCache` is what a fuzzy
+    // query for the prose word `Edge` returns, and `processor_euid` is an
+    // exact symbol name. One must not fire, the other must.
+    'src/coverage.ts': [
+      'export function edgeCache(x: number): number {',
+      '  return x + 1',
+      '}',
+      '',
+      'export function processor_euid(x: number): number {',
+      '  return x',
+      '}',
+      ''
+    ].join('\n'),
+    // `/lib/` mid-token: the path stripper must NOT treat it as a system root,
+    // or `src/lib/utils.ts` degrades to `src` and the file token is lost.
+    'src/lib/utils.ts': [
+      'export function utilsFn(x: number): number {',
+      '  return x - 1',
+      '}',
+      ''
     ].join('\n')
   }
   mkdirSync(join(sessionCwd, 'src'), { recursive: true })
   for (const [rel, body] of Object.entries(files)) {
     const target = join(sessionCwd, rel)
+    mkdirSync(dirname(target), { recursive: true })
     // Leave an existing index/source alone on a re-run, but make sure the
     // tree is present either way.
     if (!existsSync(target)) writeFileSync(target, body)
   }
 }
 ensureFixtureProject()
+
+// A vendor-only project. An explore against it can only answer with 3rdparty
+// symbols — the exact dump that taught an agent to stop using the tool
+// (session-eadce75f: 40 asio/rest_rpc symbols for a log question, then zero
+// codegraph calls for the rest of the session). The front-load must drop it.
+const vendorCwd = isWin ? join(tmpdir(), 'cg-vendor-proj') : '/tmp/cg-vendor-proj'
+function ensureVendorProject() {
+  const files = {
+    '3rdparty/asio/basic_endpoint.hpp': 'namespace asio { struct basic_endpoint { const char* path() const; }; }\n',
+    '3rdparty/asio/local/detail/endpoint.hpp': 'namespace asio { struct endpoint { const char* path() const; }; }\n',
+    '3rdparty/asio/io_context.hpp': 'namespace asio { struct io_context { void run(); }; }\n',
+    '3rdparty/asio/strand.hpp': 'namespace asio { struct strand { void dispatch(); }; }\n',
+    '3rdparty/rest_rpc/connection.h': 'namespace rest_rpc { struct connection { const char* remote_address(); }; }\n'
+  }
+  for (const [rel, body] of Object.entries(files)) {
+    const target = join(vendorCwd, rel)
+    mkdirSync(dirname(target), { recursive: true })
+    if (!existsSync(target)) writeFileSync(target, body)
+  }
+}
 
 // A second fixture INSIDE the session cwd, addressed by its bare name. This is
 // the shape that shipped broken in 1.2.2: the name reached spawn() as a cwd and
@@ -820,6 +866,128 @@ console.log('\n=== 22) frontload: does not re-trigger on its own output / non-us
   const fired2 = await waitForSteer(rpc.steered, 5000)
   if (!fired1 && !fired2) ok('own output and non-user sources are ignored')
   else bad(`loop-guard failed (marker=${fired1}, rpc=${fired2})`)
+}
+
+console.log('\n=== 22b) frontload: a vendored-only explore result is dropped, never injected ===')
+{
+  ensureVendorProject()
+  // Index through the shell service (cmd.exe), not the subprocess service:
+  // the npm shim only resolves its native platform bundle when launched
+  // through a shell, and `init` is the one command that needs it.
+  if (!existsSync(join(vendorCwd, '.codegraph'))) {
+    const init = await shellService.run({ command: 'codegraph init', workdir: vendorCwd })
+    if (init.exitCode !== 0) bad('could not index the vendor fixture', null, init.stderr.text.slice(0, 200))
+  }
+  // Prove the fixture still reproduces the bad shape through the SAME channel
+  // the front-load uses — else a green result here would only mean explore
+  // failed and the gate never ran.
+  let probe = ''
+  try {
+    probe = String(await call('codegraph_explore', { path: vendorCwd, query: 'asio path' }))
+  } catch (e) {
+    probe = `THREW: ${e.message}`
+  }
+  if (/3rdparty\//.test(probe)) ok('fixture: explore answers with 3rdparty symbols only')
+  else bad('vendor fixture did not produce a vendored explore result', probe.slice(0, 160))
+
+  const { agent, message, steered } = makeAgent(vendorCwd, 'asio path 的调用流程是怎样的？', 'fl-6')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 60000)
+  if (!fired) ok('vendored-only explore result is dropped (no negative sample injected)')
+  else bad('vendor-dominated explore result must NOT be injected', steered[0].content[0].text.slice(0, 140))
+}
+
+console.log('\n=== 22c) frontload: @-refs and filesystem paths stripped from the query ===')
+{
+  // The query is what explores the index. Handing it `@C:\…\itx_helper.log`
+  // searches for whatever symbol is named `path`; stripping the scaffolding
+  // leaves the code-shaped residue the index can actually answer.
+  const prompt = '看下 @C:\\Users\\Administrator\\Desktop\\log\\itx_helper.log 里说的 multiply 调用流程是怎样的？'
+  const { agent, message, steered } = makeAgent(sessionCwd, prompt, 'fl-7')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a path-laden structural prompt should still front-load')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('multiply')) ok('query survived sanitization and hit the index')
+    else bad('sanitized query lost the code term', text.slice(0, 120))
+    if (!/itx_helper\.log|Administrator/.test(text)) ok('no log path leaked into the injected query')
+    else bad('prompt paths leaked into the explore query', text.slice(0, 160))
+  }
+}
+
+console.log('\n=== 22d) frontload: a prose word is not a symbol (no fuzzy verification) ===')
+{
+  // `codegraph query Edge` returns `edgeCache` — a substring hit. Counting any
+  // non-empty result as verified is how a prompt full of ordinary words fired
+  // the injection and produced a dump the agent threw away. Same-name only.
+  const sync = await shellService.run({ command: 'codegraph sync', workdir: sessionCwd })
+  if (sync.exitCode !== 0) bad('could not sync the fixture index', null, sync.stderr.text.slice(0, 160))
+  const { agent, message, steered } = makeAgent(sessionCwd, 'Desktop 上的 Edge 打不开 webcodez.com，帮我看看', 'fl-8')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) ok('a prose word that only fuzzy-matches a symbol does not fire')
+  else bad('fuzzy match must not count as verification', steered[0].content[0].text.slice(0, 120))
+}
+
+console.log('\n=== 22e) frontload: an exact symbol name still fires (medium tier) ===')
+{
+  const { agent, message, steered } = makeAgent(sessionCwd, 'processor_euid 是从哪来的', 'fl-9')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('an exact symbol name must still fire the medium tier')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('processor_euid')) ok('exact symbol name fires and reaches the source')
+    else bad('injected query lost the symbol', text.slice(0, 120))
+  }
+}
+
+console.log('\n=== 22f) frontload: a bare `/` is not a path — the token after it survives ===')
+{
+  // `提交/processor_euid`: the `/` separates two words, it does not start a
+  // path. A path-stripper that eats it leaves `提交` (no keyword, no token) and
+  // the prompt silently stops firing.
+  const { agent, message, steered } = makeAgent(sessionCwd, '提交/processor_euid 是谁写的', 'fl-10')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a `/` in ordinary wording must not swallow the symbol after it')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('processor_euid')) ok('token after a bare `/` survives sanitization')
+    else bad('token after a bare `/` was stripped', text.slice(0, 120))
+  }
+}
+
+console.log('\n=== 22g) frontload: `/lib/` mid-token is not a system root ===')
+{
+  // `src/lib/utils.ts` must survive as a file token. Stripping `/lib/` mid-token
+  // leaves `src 的调用流程` — a query that matches 21 unrelated symbols instead
+  // of the file the user named.
+  const { agent, message, steered } = makeAgent(sessionCwd, 'src/lib/utils.ts 的调用流程', 'fl-11')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a relative path under src/lib/ must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('utils.ts')) ok('file token under src/lib/ survives sanitization')
+    else bad('src/lib/utils.ts was degraded', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22h) frontload: an @-ref plus a short question still fires ===')
+{
+  // DSH's most common shape. Sanitizing `@lib/index.js 调用流程` leaves
+  // `调用流程` (4 chars) — a length gate there would silently drop it.
+  const { agent, message, steered } = makeAgent(sessionCwd, '@lib/index.js 调用流程', 'fl-12')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (fired) ok('@-ref + short question still front-loads')
+  else bad('an @-ref plus a short question must not be silently dropped')
 }
 
 console.log('\n=== 23) config: frontload:false registers no listener ===')

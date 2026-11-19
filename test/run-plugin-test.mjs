@@ -616,6 +616,26 @@ try {
   bad('codegraph_node', null, e.message)
 }
 
+console.log('\n=== 9b) codegraph_node: a FILE in `path` disambiguates the symbol ===')
+try {
+  const n = String(await call('codegraph_node', { name: 'multiply', path: 'src/math.ts' }))
+  console.log('   node(path=src/math.ts):', n.slice(0, 200))
+  if (/Location:\*?\*?\s*src\/math\.ts/.test(n)) ok('file in `path` disambiguated the symbol to that file')
+  else bad('a FILE passed as `path` was not used as the file', n.slice(0, 200))
+} catch (e) {
+  bad('codegraph_node with a file in `path`', null, e.message)
+}
+
+console.log('\n=== 9c) codegraph_node: `path` = file, `name` = same file → file read ===')
+try {
+  const n = String(await call('codegraph_node', { name: 'src/math.ts', path: 'src/math.ts', limit: 3 }))
+  console.log('   node(file read):', n.slice(0, 200))
+  if (n.includes('export function multiply')) ok('file mode read the requested range')
+  else bad('file mode did not read the file', n.slice(0, 200))
+} catch (e) {
+  bad('codegraph_node file read via `path`', null, e.message)
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))

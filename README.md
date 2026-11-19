@@ -33,6 +33,10 @@
 
 工具名与 CodeGraph 官方 MCP 工具同名，模型的使用心智与官方文档一致。
 
+`codegraph_node` 的 `path` 既可传项目目录，也可直接传文件路径：传文件时该值被当作
+`--file` 参数（读文件，或把符号限定到该文件），项目根仍是会话工作区，不会报
+`project path does not exist`。
+
 ## 前置要求
 
 1. 已安装 [DSH](https://github.com/deepseek-ai/deepseek-harness)（本插件为 DSH bundle，随

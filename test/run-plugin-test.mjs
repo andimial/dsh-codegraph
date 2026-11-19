@@ -13,7 +13,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { existsSync, readFileSync, realpathSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -314,12 +314,12 @@ if (!existsSync(join(relProjectDir, 'src/rel.ts'))) {
   writeFileSync(join(relProjectDir, 'src/rel.ts'), 'export function relFn(x: number): number {\n  return x + 1\n}\n')
 }
 
-function makeExec() {
+function makeExec(cwd = sessionCwd) {
   const aborted = { value: false }
   let signal
   const ctrl = new AbortController()
   return {
-    agent: { session: { header: { cwd: sessionCwd } } },
+    agent: { session: { header: { cwd } } },
     signal: ctrl.signal,
     abort() {
       aborted.value = true
@@ -634,6 +634,35 @@ try {
   else bad('file mode did not read the file', n.slice(0, 200))
 } catch (e) {
   bad('codegraph_node file read via `path`', null, e.message)
+}
+
+console.log('\n=== 9d) multi-repo workspace: file mode resolves against the owning member ===')
+// A symlink-aggregation workspace: the cwd carries no index, its members do.
+// `--file` is matched against the MEMBER's own index, so an absolute or
+// backslash value never matches — and the CLI reports that on exit code 0, so a
+// wrong argv silently answers "No indexed file matches ..." instead of failing.
+const memberWs = isWin ? join(tmpdir(), 'cg-member-ws') : '/tmp/cg-member-ws'
+const nodeToolFor = () => registeredTools.find((x) => x.name === 'codegraph_node')
+try {
+  mkdirSync(memberWs, { recursive: true })
+  const memberLink = join(memberWs, 'proj')
+  if (!existsSync(memberLink)) symlinkSync(sessionCwd, memberLink, isWin ? 'junction' : 'dir')
+  const read = String(await nodeToolFor().execute({ name: 'proj/src/math.ts', path: 'proj/src/math.ts', limit: 2 }, makeExec(memberWs)))
+  console.log('   member file read:', read.slice(0, 160))
+  if (/No indexed file matches|Symbol ".*" not found/.test(read)) bad('member file mode returned the CLI error line as the answer', read.slice(0, 160))
+  else if (read.includes('export function multiply')) ok('member file mode read the file through the owning member')
+  else bad('member file mode did not read the file', read.slice(0, 160))
+} catch (e) {
+  bad('multi-repo file mode (file read)', null, e.message)
+}
+try {
+  const sym = String(await nodeToolFor().execute({ name: 'multiply', path: 'proj/src/math.ts' }, makeExec(memberWs)))
+  console.log('   member symbol+file:', sym.slice(0, 160))
+  if (/No indexed file matches|Symbol ".*" not found/.test(sym)) bad('member symbol mode returned the CLI error line as the answer', sym.slice(0, 160))
+  else if (/Location:\s*\**\s*src\/math\.ts/.test(sym)) ok('member symbol mode disambiguated the symbol to the file')
+  else bad('member symbol mode did not reach the symbol', sym.slice(0, 160))
+} catch (e) {
+  bad('multi-repo file mode (symbol + file)', null, e.message)
 }
 
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')

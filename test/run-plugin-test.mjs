@@ -700,6 +700,41 @@ try {
   bad('multi-repo stray file', null, e.message)
 }
 
+console.log('\n=== 9f) multi-repo workspace: non-owner member is read FIRST ===')
+// Two members, the one that does NOT hold the file read first (readdir order:
+// alpha < proj). A non-owner asked for a file answers `No indexed file matches
+// "..."` on exit code 0, and the first-answer rule would return that miss line
+// as the file's content — so file mode must skip it, not ask it.
+const memberWs2 = join(tmpdir(), 'cg-member-ws2')
+try {
+  ensureVendorProject()
+  if (!existsSync(join(vendorCwd, '.codegraph'))) {
+    const init = await shellService.run({ command: 'codegraph init', workdir: vendorCwd })
+    if (init.exitCode !== 0) bad('could not index the non-owner member fixture', null, init.stderr.text.slice(0, 200))
+  }
+  mkdirSync(memberWs2, { recursive: true })
+  for (const [link, target] of [['alpha', vendorCwd], ['proj', sessionCwd]]) {
+    if (!existsSync(join(memberWs2, link))) symlinkSync(target, join(memberWs2, link), isWin ? 'junction' : 'dir')
+  }
+  const n = String(await nodeToolFor().execute({ name: 'src/math.ts', file: true, limit: 2 }, makeExec(memberWs2)))
+  console.log('   file:true (non-owner first):', n.slice(0, 160))
+  if (/No indexed file matches|Symbol ".*" not found/.test(n)) bad('a non-owner member answered with its miss line', n.slice(0, 200))
+  else if (n.includes('export function multiply')) ok('the owner answers even with a non-owner member read first')
+  else bad('file:true returned no content with two members', n.slice(0, 200))
+} catch (e) {
+  bad('multi-repo file:true (non-owner first)', null, e.message)
+}
+try {
+  // codegraph_files prints member-prefixed paths; file:true must accept that shape.
+  const p = String(await nodeToolFor().execute({ name: 'proj/src/math.ts', file: true, limit: 2 }, makeExec(memberWs2)))
+  console.log('   file:true (member-prefixed):', p.slice(0, 160))
+  if (/No indexed file matches|Symbol ".*" not found/.test(p)) bad('a member-prefixed file path was not resolved', p.slice(0, 200))
+  else if (p.includes('export function multiply')) ok('file:true accepts a workspace-relative (member-prefixed) path')
+  else bad('file:true did not read the member-prefixed file', p.slice(0, 200))
+} catch (e) {
+  bad('multi-repo file:true (member-prefixed)', null, e.message)
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))

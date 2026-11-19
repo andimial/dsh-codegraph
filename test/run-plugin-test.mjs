@@ -751,6 +751,26 @@ try {
   bad('multi-repo root-shadow case', null, e.message)
 }
 
+console.log('\n=== 9h) the path: entry is not shadowed by a workspace-root file either ===')
+// `path` naming the root stray file must still reach the member copy: the root
+// file is in no member's index, so asking each member about it answers nothing.
+try {
+  const read = String(await nodeToolFor().execute({ name: 'src/math.ts', path: 'src/math.ts', limit: 2 }, makeExec(memberWs2)))
+  console.log('   path: file mode:', read.slice(0, 160))
+  if (read.includes('export function multiply')) ok('path: file mode falls through to the member copy')
+  else bad('path: file mode stopped at the workspace-root file', read.slice(0, 200))
+} catch (e) {
+  bad('multi-repo path: file mode', null, e.message)
+}
+try {
+  const sym = String(await nodeToolFor().execute({ name: 'multiply', path: 'src/math.ts' }, makeExec(memberWs2)))
+  console.log('   path: symbol+file:', sym.slice(0, 160))
+  if (/Location:\s*\**\s*src\/math\.ts/.test(sym)) ok('path: symbol mode resolves the member copy too')
+  else bad('path: symbol mode lost the member copy', sym.slice(0, 200))
+} catch (e) {
+  bad('multi-repo path: symbol+file', null, e.message)
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))

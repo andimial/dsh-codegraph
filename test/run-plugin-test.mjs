@@ -665,6 +665,41 @@ try {
   bad('multi-repo file mode (symbol + file)', null, e.message)
 }
 
+console.log('\n=== 9e) multi-repo workspace: the documented file:true shape, realpath callers, and a stray file ===')
+// `file: true` means "the name IS a file path", and callers pass it relative to
+// the MEMBER root. Resolving it against the workspace root instead skipped every
+// member and returned an empty JSON body.
+try {
+  mkdirSync(memberWs, { recursive: true })
+  if (!existsSync(join(memberWs, 'proj'))) symlinkSync(sessionCwd, join(memberWs, 'proj'), isWin ? 'junction' : 'dir')
+  const read = String(await nodeToolFor().execute({ name: 'src/math.ts', file: true, limit: 2 }, makeExec(memberWs)))
+  console.log('   file:true (member-relative):', read.slice(0, 160))
+  if (read.includes('export function multiply')) ok('file:true with a member-relative name reads the file')
+  else bad('file:true with a member-relative name returned no content', read.slice(0, 200))
+} catch (e) {
+  bad('multi-repo file:true (member-relative)', null, e.message)
+}
+try {
+  // A caller holding the member's REAL path rather than the workspace symlink.
+  const real = join(realpathSync(sessionCwd), 'src/math.ts')
+  const n = String(await nodeToolFor().execute({ name: 'multiply', path: real }, makeExec(memberWs)))
+  console.log('   realpath caller:', n.slice(0, 160))
+  if (/Location:\s*\**\s*src\/math\.ts/.test(n)) ok('a realpath caller reaches the owning member')
+  else bad('a realpath caller lost the member match', n.slice(0, 200))
+} catch (e) {
+  bad('multi-repo realpath caller', null, e.message)
+}
+try {
+  // A file in the workspace that no member indexes: say so instead of an empty body.
+  writeFileSync(join(memberWs, 'stray.ts'), 'export const stray = 1\n')
+  const n = String(await nodeToolFor().execute({ name: 'stray.ts', path: 'stray.ts' }, makeExec(memberWs)))
+  console.log('   stray file:', n.slice(0, 160))
+  if (/No indexed member repository contains/.test(n)) ok('a file outside every member reports why it has no answer')
+  else bad('a file outside every member returned a bare JSON body', n.slice(0, 200))
+} catch (e) {
+  bad('multi-repo stray file', null, e.message)
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))

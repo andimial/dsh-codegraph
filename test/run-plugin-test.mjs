@@ -735,6 +735,22 @@ try {
   bad('multi-repo file:true (member-prefixed)', null, e.message)
 }
 
+console.log('\n=== 9g) a same-named file at the workspace root does not shadow the member file ===')
+// The workspace-relative form (`<member>/<path>`) must only win when it lands
+// INSIDE a member. A plain `src/math.ts` that also exists at the workspace root
+// used to resolve to the root file, which no member contains — the member copy
+// was then never asked and the call answered "no member contains ...".
+try {
+  mkdirSync(join(memberWs2, 'src'), { recursive: true })
+  writeFileSync(join(memberWs2, 'src/math.ts'), 'export function rootMath(): number {\n  return 0\n}\n')
+  const n = String(await nodeToolFor().execute({ name: 'src/math.ts', file: true, limit: 2 }, makeExec(memberWs2)))
+  console.log('   root shadow:', n.slice(0, 160))
+  if (n.includes('export function multiply')) ok('the member file wins over a same-named workspace-root file')
+  else bad('a workspace-root file shadowed the member file', n.slice(0, 200))
+} catch (e) {
+  bad('multi-repo root-shadow case', null, e.message)
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))

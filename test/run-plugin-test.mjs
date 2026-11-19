@@ -256,6 +256,10 @@ function ensureFixtureProject() {
       'export function Autowired(x: number): number {',
       '  return x',
       '}',
+      '',
+      'export function Override(x: number): number {',
+      '  return x',
+      '}',
       ''
     ].join('\n'),
     // `/lib/` mid-token: the path stripper must NOT treat it as a system root,
@@ -1121,6 +1125,23 @@ console.log('\n=== 22p) frontload: UNC paths stop at punctuation too ===')
     else bad('UNC path lost its basename', text.slice(0, 140))
     if (text.includes('multiply')) ok('the word after the UNC punctuation survives')
     else bad('the word after the UNC punctuation was swallowed', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22q) frontload: a bare `@word` with a trailing `.` keeps its word ===')
+{
+  // `@Override.` is the bare word plus sentence punctuation, not a filename
+  // that happens to contain a `.`. Judging barenness on the trimmed token is
+  // what keeps it from falling into the file branch and being dropped.
+  const { agent, message, steered } = makeAgent(sessionCwd, '为什么 @Override. 没生效', 'fl-21')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a bare `@word.` must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('Override')) ok('bare `@word.` keeps its word')
+    else bad('trailing `.` still deleted the bare word', text.slice(0, 140))
   }
 }
 

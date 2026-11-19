@@ -242,13 +242,18 @@ function ensureFixtureProject() {
     ].join('\n'),
     // Names chosen for the medium-tier gate: `edgeCache` is what a fuzzy
     // query for the prose word `Edge` returns, and `processor_euid` is an
-    // exact symbol name. One must not fire, the other must.
+    // exact symbol name. One must not fire, the other must. `Autowired` is a
+    // decorator-looking word that IS a real symbol — it must survive the `@`.
     'src/coverage.ts': [
       'export function edgeCache(x: number): number {',
       '  return x + 1',
       '}',
       '',
       'export function processor_euid(x: number): number {',
+      '  return x',
+      '}',
+      '',
+      'export function Autowired(x: number): number {',
       '  return x',
       '}',
       ''
@@ -266,9 +271,9 @@ function ensureFixtureProject() {
   for (const [rel, body] of Object.entries(files)) {
     const target = join(sessionCwd, rel)
     mkdirSync(dirname(target), { recursive: true })
-    // Leave an existing index/source alone on a re-run, but make sure the
-    // tree is present either way.
-    if (!existsSync(target)) writeFileSync(target, body)
+    // Rewrite when the fixture body changed, so a symbol added here reaches
+    // the index on the next `sync` instead of waiting for a pristine temp dir.
+    if (!existsSync(target) || readFileSync(target, 'utf8') !== body) writeFileSync(target, body)
   }
 }
 ensureFixtureProject()
@@ -1068,6 +1073,54 @@ console.log('\n=== 22m) frontload: a bare @-ref to a non-code file is dropped ==
     const text = steered[0].content.map((b) => b.text).join('\n')
     if (!text.includes('itx_helper.log')) ok('non-code @-ref is dropped')
     else bad('a non-code @-ref leaked into the query', text.slice(0, 160))
+  }
+}
+
+console.log('\n=== 22n) frontload: a bare `@word` is not a file reference ===')
+{
+  // `@Autowired` / `@Override` / `@types/node` are decorators, annotations and
+  // package scopes — real lexical search terms. Only the `@` goes.
+  const { agent, message, steered } = makeAgent(sessionCwd, '为什么 @Autowired multiply 注入失败', 'fl-18')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a prompt naming a real symbol must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('Autowired')) ok('the bare `@word` keeps its word')
+    else bad('a bare `@word` was deleted instead of just the `@`', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22o) frontload: a sentence-ending `.` after a path is trimmed ===')
+{
+  // `@src/math.ts.` — the `.` is kept for the extension, so a second trim is
+  // needed or the basename is `math.ts.` and matches no extension at all.
+  const { agent, message, steered } = makeAgent(sessionCwd, '看 @src/math.ts. 为什么', 'fl-19')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a trailing `.` must not swallow the file name')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('math.ts')) ok('basename survives a trailing `.`')
+    else bad('trailing `.` swallowed the basename', text.slice(0, 140))
+  }
+}
+
+console.log('\n=== 22p) frontload: UNC paths stop at punctuation too ===')
+{
+  const { agent, message, steered } = makeAgent(sessionCwd, '\\\\srv\\share\\src\\math.ts、multiply 为什么错', 'fl-20')
+  for (const h of frontloadHandlers) h.handler({ agent, message })
+  const fired = await waitForSteer(steered, 45000)
+  if (!fired) {
+    bad('a UNC path followed by `、` must still fire')
+  } else {
+    const text = steered[0].content.map((b) => b.text).join('\n')
+    if (text.includes('math.ts')) ok('UNC basename survives')
+    else bad('UNC path lost its basename', text.slice(0, 140))
+    if (text.includes('multiply')) ok('the word after the UNC punctuation survives')
+    else bad('the word after the UNC punctuation was swallowed', text.slice(0, 140))
   }
 }
 

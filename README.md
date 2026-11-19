@@ -136,7 +136,8 @@ grep / glob / read**：
   路径 token 在空白 / 中文 / 标点（`、` `,` 反引号 …）处结束，`math.ts、multiply` 不会
   连 `multiply` 一起吃。裸 `/` 不算路径——`登录/注册流程` 里的关键词、`src/lib/utils.ts`
   里的文件名必须留下。非代码扩展名（`itx_helper.log`、`README.md`）整段丢弃，带不带盘符
-  都一样，不留在 query 里。
+  都一样，不留在 query 里；`@Autowired`、`@types/node` 这种裸词只剥 `@`、词本身保留——
+  它们是装饰器 / 注解 / 包 scope，常在索引里就是真实符号。
 - 触发后在会话 cwd 向上找最近的 `.codegraph/` 索引根（找不到 = 未索引 = 静默跳过，
   **是否索引是用户的决定，插件不擅自 init**），预跑 `codegraph_explore`，把结果以
   `<codegraph_context>` 包裹 steer 进当前 turn（上限 12000 字符）。
@@ -146,7 +147,8 @@ grep / glob / read**：
   40 个 asio/rest_rpc 符号，随后 0 次 codegraph 调用）。
 - **没命中也不注入**：explore 无结果时 exit 0，stdout 是 `No relevant code found for "…"`
   那段劝退文案——同属负样本，直接丢。多成员工作区（symlink-aggregation）**逐成员**判断，
-  某个成员没命中不会连坐其它成员的真结果，也不会混进拼接体。
+  某个成员没命中不会连坐其它成员的真结果，也不会混进拼接体；次数上限按**尝试**计，
+  no-hit 的成员同样占用一次预算。
 - 于是「模型反射性 grep/read 要找的东西已经在上下文里了」——context 先于工具调用到达。
 - **绝不弄坏用户 prompt**：所有失败路径（无索引、门控未命中、CLI 报错）都是静默 no-op；
   注入内容带标记，不会触发自身循环（steer 落在 next-step 边界，监听器只看 next-turn）。

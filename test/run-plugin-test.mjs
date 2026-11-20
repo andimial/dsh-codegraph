@@ -771,6 +771,38 @@ try {
   bad('multi-repo path: symbol+file', null, e.message)
 }
 
+console.log('\n=== 9i) path: must not hand the file to a non-owner carrying the same nested path ===')
+// The twin fallback is for a file that lives in NO member. A member that ships
+// `<other-member>/<path>` as its own content must not be asked first, or it
+// answers with its own file (or a symbol miss line) instead of the real one.
+{
+  const nested = join(tmpdir(), 'cg-nested-proj')
+  const ws3 = join(tmpdir(), 'cg-member-ws5')
+  try {
+    mkdirSync(join(nested, 'proj/src'), { recursive: true })
+    writeFileSync(join(nested, 'proj/src/math.ts'), 'export function vendorNested(): number {\n  return 1\n}\n')
+    if (!existsSync(join(nested, '.codegraph'))) {
+      const init = await shellService.run({ command: 'codegraph init', workdir: nested })
+      if (init.exitCode !== 0) bad('could not index the nested-path fixture', null, init.stderr.text.slice(0, 200))
+    }
+    mkdirSync(ws3, { recursive: true })
+    for (const [link, target] of [['aaa', nested], ['proj', sessionCwd]]) {
+      if (!existsSync(join(ws3, link))) symlinkSync(target, join(ws3, link), isWin ? 'junction' : 'dir')
+    }
+    const read = String(await nodeToolFor().execute({ name: 'proj/src/math.ts', path: 'proj/src/math.ts', limit: 2 }, makeExec(ws3)))
+    console.log('   nested non-owner:', read.slice(0, 160))
+    if (read.includes('vendorNested')) bad('a non-owner with the same nested path answered', read.slice(0, 200))
+    else if (read.includes('export function multiply')) ok('the owning member answers, not the nested-path twin')
+    else bad('nested-path case returned no expected content', read.slice(0, 200))
+    const sym = String(await nodeToolFor().execute({ name: 'multiply', path: 'proj/src/math.ts' }, makeExec(ws3)))
+    console.log('   nested non-owner symbol:', sym.slice(0, 160))
+    if (/Location:\s*\**\s*src\/math\.ts/.test(sym) && !/not found/.test(sym)) ok('symbol mode follows the owner too')
+    else bad('symbol mode was answered by the nested-path twin', sym.slice(0, 200))
+  } catch (e) {
+    bad('multi-repo nested-path case', null, e.message)
+  }
+}
+
 console.log('\n=== 10) codegraph_callers(double) & codegraph_callees(multiply) ===')
 try {
   const c = String(await call('codegraph_callers', { symbol: 'double' }))
